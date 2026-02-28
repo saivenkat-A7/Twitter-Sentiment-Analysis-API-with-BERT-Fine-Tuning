@@ -358,3 +358,7 @@ python scripts/train.py --sample-size 1000
 ```
 
 ---
+
+**Video Demo**
+https://youtu.be/hRrOjVLocP8
+
