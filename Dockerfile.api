@@ -1,0 +1,73 @@
+# Stage 1: Builder
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /wheels
+
+COPY requirements.txt     .
+COPY requirements.api.txt .
+
+# CPU-only torch wheel cached separately — only rebuilt when version changes
+RUN pip wheel --no-cache-dir --wheel-dir /wheels/dist \
+        torch==2.3.1+cpu \
+        --extra-index-url https://download.pytorch.org/whl/cpu
+
+# All remaining dependencies
+RUN pip wheel --no-cache-dir --wheel-dir /wheels/dist \
+        -r requirements.txt \
+        -r requirements.api.txt \
+        --extra-index-url https://download.pytorch.org/whl/cpu
+
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Install from pre-built wheels — no network, no compiler, very fast
+COPY --from=builder /wheels/dist /wheels/dist
+RUN pip install --no-cache-dir --no-index \
+        --find-links=/wheels/dist \
+        torch transformers datasets scikit-learn \
+        pandas numpy sentencepiece \
+        fastapi "uvicorn[standard]" pydantic \
+    && rm -rf /wheels/dist \
+    && pip cache purge
+
+# Application code + entrypoint
+COPY scripts/          ./scripts/
+COPY src/api.py        ./src/api.py
+COPY entrypoint.api.sh ./entrypoint.api.sh
+
+RUN chmod +x entrypoint.api.sh \
+    && mkdir -p data/processed model_output results
+
+# ── Environment ───────────────────────────────────────────────────────────────
+ENV MODEL_PATH=/app/model_output
+ENV MODEL_OUTPUT=/app/model_output
+ENV API_PORT=8000
+ENV MAX_LEN=128
+ENV PROCESSED_DATA_DIR=/app/data/processed
+ENV RESULTS_DIR=/app/results
+ENV TRANSFORMERS_VERBOSITY=error
+ENV HF_HUB_DISABLE_TELEMETRY=1
+ENV CUDA_VISIBLE_DEVICES=""
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8000
+
+# start_period=1800s (30 min) — covers preprocessing + training time on CPU
+# Docker will not mark the container unhealthy during this window
+HEALTHCHECK --interval=30s --timeout=10s --start-period=1800s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+CMD ["./entrypoint.api.sh"]
